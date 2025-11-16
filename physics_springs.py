@@ -245,13 +245,13 @@ class Joint :
                 
         elif body == self.Body_2:
             if self.Body_1 != None:
-                offset_1 = self.pilot_1# @ self.Body_1.rotation_matrix#.inverted()
+                offset_1 = self.pilot_1 @ self.Body_2.rotation_matrix.transposed()
                 pos_1 = self.Body_1.position #+ offset_1
             else:
                 offset_1 = self.pilot_1
                 pos_1 = Vector([0.0,0.0,0.0])
             if self.Body_2 != None:
-                offset_2= self.pilot_2# @ self.Body_2.rotation_matrix#.inverted()
+                offset_2= self.pilot_2@ self.Body_1.rotation_matrix.transposed()
                 pos_2 = self.Body_2.position #+ offset_2
             else:
                 offset_2 = self.pilot_2
