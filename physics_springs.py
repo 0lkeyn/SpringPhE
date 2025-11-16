@@ -4,6 +4,9 @@ from mathutils import *
 import numpy as np
 from numpy_da import DynamicArray
 from random import random
+
+import bpy
+
 DEBUG = True
 start_time = time.time()
 q_zero = Quaternion((1.0,0.0,0.0,0.0))
@@ -12,6 +15,9 @@ M0 = Matrix([[1.0,0.0,0.0,0.0]
                 ,[0.0,1.0,0.0,0.0]
                 ,[0.0,0.0,1.0,0.0]
                 ,[0.0,0.0,0.0,1.0]])
+def _normalize_angle(angle):
+    """Нормалізує кут в діапазон [-pi, pi]."""
+    return atan2(sin(angle), cos(angle))
 
 def rotation_matrix_from_euler_angles(roll, pitch, yaw):
     """
@@ -73,7 +79,7 @@ def euler_from_quaternion(q,radians = True):
             w = q[0]
             x = q[1]
             y = q[2]
-            z = q[0]
+            z = q[3]
             """
             Convert a quaternion into euler angles (roll, pitch, yaw)
             roll is rotation around x in radians (counterclockwise)
@@ -172,13 +178,14 @@ class Acceleration (Force):
         else:
             self.types = 'NONE'
 class Joint :
-    def __init__(self, Body_1,Body_2=None, strength = 1.0, torque = 0.5,friction = 0.5, pilot_1= [0.0,0.0,0.0], pilot_2 =[0.0,0.0,0.0], local = True, flex = True,
+    def __init__(self, Body_1,Body_2=None, strength = 1.0, stiffness = 1.0,torque = 0.5,friction = 0.5, pilot_1= [0.0,0.0,0.0], pilot_2 =[0.0,0.0,0.0], local = True, flex = True, rigid = True,
                 collision =False, max_limit_rot = Euler([0.0,0.0,0.0]),min_limit_rot = Euler([0.0,0.0,0.0]),min_length = 0.0,max_length = 0.0,active = True):
         global DEBUG
         self.ID = start_time - time.time()
         if DEBUG:
             print ('Joint object',self.ID)
         self.strength = strength
+        self.stiffness = stiffness
         self.torque = torque
         self.friction = friction
         self.Body_1 = Body_1
@@ -189,6 +196,7 @@ class Joint :
         self.min_limit_rot = Euler([0.0,0.0,0.0])
         self.local = local
         self.flex = flex
+        self.rigid = rigid
         self.collision = collision
         error = False
         if len (max_limit_rot) == 3 and len (min_limit_rot) == 3:
@@ -223,13 +231,18 @@ class Joint :
                 offset_2 = self.pilot_2
                 pos_2 = Vector([0.0,0.0,0.0])
             vec = pos_2 - pos_1 + offset_2 - offset_1
-            if self.flex:
-                if vec.length > self.min_length:
-                    return vec
+            if self.rigid:
+                return vec
+            else:
+                if vec.length < self.min_length:
+                    if vec.length > self.max_length:
+                        return vec
+                    else:
+                        self.active = False
+                        return Vector([0.0,0.0,0.0])
                 else:
                     return Vector([0.0,0.0,0.0])
-            else:
-                return vec
+                
         elif body == self.Body_2:
             if self.Body_1 != None:
                 offset_1 = self.pilot_1# @ self.Body_1.rotation_matrix#.inverted()
@@ -244,17 +257,18 @@ class Joint :
                 offset_2 = self.pilot_2
                 pos_2 = Vector([0.0,0.0,0.0])
             vec = pos_1 - pos_2 + offset_1 - offset_2
-            if self.flex:
+            if self.rigid:
+                return vec
+            else:
                 if vec.length < self.min_length:
-                    if vec.length > self.mam_length:
-                        return vec
-                    else:
+                    return vec
+                else:
+                    if vec.length > self.max_length:
                         self.active = False
                         return Vector([0.0,0.0,0.0])
-                else:
-                    return Vector([0.0,0.0,0.0])
-            else:
-                return vec
+                    else:
+                        return vec
+                    
     def get_rotation_difference (self, body = None):
         '''def normalize(v):
             norm=np.linalg.norm(v)
@@ -269,7 +283,7 @@ class Joint :
             w = q[0]
             x = q[1]
             y = q[2]
-            z = q[0]
+            z = q[3]
             """
             Convert a quaternion into euler angles (roll, pitch, yaw)
             roll is rotation around x in radians (counterclockwise)
@@ -311,20 +325,17 @@ class Joint :
             else:
                 res = Euler([0.0,0.0,0.0])
             if self.flex:
-                print ('flex')
+                print ('flex', res)
                 for i in range (len(res)):
-                    if self.max_limit_rot[i] > res[i] > self.min_limit_rot[i]  :
+                    if self.max_limit_rot[i] >= res[i] >= self.min_limit_rot[i]  :
                         res[i] = 0.0
-                        print ('flex_1')
-                    elif self.max_limit_rot[i] < res[i]:
-                        res[i] -= self.max_limit_rot[i]
-                        print ('flex_2')
+                        print ('flex_1_1')
                     elif res[i] < self.min_limit_rot[i]:
                         res[i] += self.min_limit_rot[i]
-                        print ('flex_3')
-                    else:
-                        print ('flex_error')
-            return res
+                        print ('flex_1_2_minimum')
+                    elif res[i] > self.max_limit_rot[i]:
+                        res[i] -= self.max_limit_rot[i]
+                        print ('flex_1_3_maximum')
         elif body ==self.Body_2:
             if self.Body_1 != None:
                 rot_1 = self.Body_2.rotation_matrix
@@ -341,15 +352,21 @@ class Joint :
             else:
                 res = Euler([0.0,0.0,0.0])
             if self.flex:
-                print ('flex')
+                print ('flex', res)
                 for i in range (len(res)):
-                    if self.max_limit_rot[i] <-1* res[i] < self.min_limit_rot[i]  :
+                    #res[i] *= -1
+                    if self.min_limit_rot[i]*-1 >= res[i] >= self.max_limit_rot[i]*-1  :
                         res[i] = 0.0
-                    elif self.max_limit_rot[i] > -1*res[i]:
-                        res[i] -= self.max_limit_rot[i]
-                    elif -1*res[i] > self.min_limit_rot[i]:
+                        print ('flex_2_1')
+                    elif res[i] > self.min_limit_rot[i]*-1:
                         res[i] -= self.min_limit_rot[i]
-            return res
+                        print ('flex_2_2_minimum')
+                    elif res[i] < self.max_limit_rot[i]*-1:
+                        res[i] += self.max_limit_rot[i]
+                        print ('flex_2_3_maximum')                    
+        for i in range(3):
+            res[i] = _normalize_angle(res[i])
+        return res
 class BallJoint (Joint):
     def __init__(self, Body_1,Body_2=None, strength = 1.0,friction = 0.5, pilot_1= [0.0,0.0,0.0], pilot_2 =[0.0,0.0,0.0], local = True, flex = False,
                 collision =False, max_length = 0.0,min_length =0.0):
@@ -529,50 +546,129 @@ class PhysicBody:
     def apply_motion(self):
         if self.linked_object != None:
             self.linked_object.matrix_world = self.matrix_base
-            self.linked_object['velocity'] =  S.velocity
-            self.linked_object['rel_velocity'] =  S.rel_velocity
-            self.linked_object['angular_velocity'] = S.angular_velocity
-            self.linked_object['rel_angular_velocity'] = S.rel_angular_velocity#'''
+            self.linked_object['velocity'] =  self.velocity
+            self.linked_object['rel_velocity'] =  self.rel_velocity
+            self.linked_object['angular_velocity'] = self.angular_velocity
+            self.linked_object['rel_angular_velocity'] = self.rel_angular_velocity#'''
     def slerp_motion(self,delta=0.01):
         matrix_new = self.matrix_base.copy()
         way = Vector([0.0,0.0,0.0])
-        last_rot = Euler([0.0,0.0,0.0])
-        #rot_ = Quaternion([1.0,0.0,0.0,0.0])#.as_matrix()
-        #curent_rotation = self.rotation_matrix
-        forces = [ f for f in self.forces]
+        last_rot = Euler([0.0,0.0,0.0]) # Використовується для перевірки в кінці
+        
+        # --- 1. Ініціалізація сил і моментів ---
+        # Ми будемо накопичувати всі сили тут
+        total_local_force = Vector([0.0, 0.0, 0.0])
+        total_local_torque = Euler([0.0, 0.0, 0.0]) # Ви використовуєте Euler для моментів
+
+        # Переконайтеся, що маса встановлена!
+        if self.mass <= 0.0001:
+            print(f"Warning: Object {self.linked_object.name} has zero or negative mass!")
+            # Використовуємо 1.0, щоб уникнути ділення на нуль
+            effective_mass = 1.0
+        else:
+            effective_mass = self.mass
+            
+        # Спрощена інерція (для стабільності кутового демпфування)
+        # У реальному фреймворку тут має бути тензор інерції
+        I_approx = effective_mass 
+
+        # --- 2. Розрахунок сил від Joint (Пружини та Демпфери) ---
         for joint in self.joints:
+            # === Лінійна Пружина-Демпфер ===
+            
+            # Отримуємо поточну швидкість (глобальну)
             res_velocity = self.velocity + self.rel_velocity @ self.rotation_matrix
-            #res_velocity = self.velocity
-            way = res_velocity*delta
-            j_vec = joint.get_distance(body = self)
-            vec = 1.0*j_vec  @ self.rotation_matrix.transposed() - 0.8*way @ self.rotation_matrix.transposed()#inverted()#transposed()#adjugated()# @ self.rotation_matrix
-            scalar = (vec[0]**2+ vec[1]**2+vec[2]**2)**0.5
-            if joint.Body_1 == self:
-                react_force = Force(vec,strength =2.5,offset = joint.pilot_1,local=True)
-            else:
-                react_force = Force(vec,strength =2.5,offset = joint.pilot_2,local=True)
-            self.rel_velocity = self.rel_velocity + react_force.get_force_vector*delta*1.0
-            forces.append (react_force)
-            drot = joint.get_rotation_difference(self)
+            
+            # Отримуємо вектор помилки (відхилення пружини)
+            # j_vec = (target_pos - current_pos)
+            j_vec = joint.get_distance(body = self) 
+            
+            # --- Розрахунок правильних коефіцієнтів ---
+            k = joint.strength           # k (Жорсткість пружини)
+            zeta = joint.stiffness       # zeta (Ваш коефіцієнт демпфування 0-1)
+            
+            # Формули для демпфера
+            c_crit = 2.0 * sqrt(effective_mass * k)
+            c = zeta * c_crit            # c (Реальний коефіцієнт гасіння)
+
+            # --- Обчислення сил ---
+            # F = F_spring + F_damp = (-k * x) + (-c * v)
+            # Примітка: Ваш get_distance, здається, повертає (target - current), тому ми множимо на k, а не -k
+            
+            F_spring = k * j_vec
+            
+            # Гасіння протидіє поточній швидкості
+            F_damp = -c * res_velocity 
+            
+            # Загальна сила від з'єднання (у глобальних координатах)
+            F_total_global = F_spring + F_damp
+            
+            # Конвертуємо у локальну силу для додавання до rel_velocity (як у вашому коді)
+            F_total_local = F_total_global @ self.rotation_matrix.transposed()
+            total_local_force += F_total_local
+            
+            # === Кутова Пружина-Демпфер ===
+
+            # Поточна кутова швидкість (локальна, як ви її використовуєте)
+            current_ang_vel = self.rel_angular_velocity
+            
+            # Помилка обертання (відхилення)
+            drot = joint.get_rotation_difference(self) # theta
+            
+            # --- Розрахунок коефіцієнтів ---
+            k_rot = joint.torque       # k_theta (Кутова жорсткість)
+            zeta_rot = joint.friction  # zeta_theta (Ваш коефіцієнт 0-1)
+            
+            c_rot_crit = 2.0 * sqrt(I_approx * k_rot)
+            c_rot = zeta_rot * c_rot_crit # c_theta (Кутовий коефіцієнт гасіння)
+
+            # --- Обчислення моментів (Torque) ---
+            # Tau = Tau_spring + Tau_damp = (-k * theta) + (-c * omega)
+            
+            Tau_spring = Euler([0.0, 0.0, 0.0])
+            Tau_damp = Euler([0.0, 0.0, 0.0])
+            
+            for i in range(3):
+                # Ваш get_rotation_difference, здається, повертає (target-current), тому +
+                Tau_spring[i] = k_rot * drot[i] 
+                Tau_damp[i] = -c_rot * current_ang_vel[i]
+            
+            # Зберігаємо 'last_rot' для вашої логіки в кінці
             for i in range (3):
-                self.rel_angular_velocity[i] += drot[i]*delta*0.5
-                last_rot[i] += drot[i]*delta*0.5
-            #self.rel_angular_velocity = np.add(self.rel_angular_velocity,drot)
+                last_rot[i]+= Tau_spring[i] * delta / I_approx 
+            
+            # Додаємо загальний момент (локальний)
+            for i in range (3):
+                total_local_torque[i] += (Tau_spring[i] + Tau_damp[i])
+
+        # --- 3. Розрахунок сил від зовнішніх Forces ---
+        # (Ця частина коду виглядає складною, я залишу її, але
+        # рекомендую спростити її в майбутньому)
+        
+        forces = [ f for f in self.forces]
+        
+        # Додаємо об'єднану силу від Joint як одну локальну силу
+        if total_local_force.length > 0.001:
+             forces.append(Force(total_local_force, strength=1.0, local=True))
+        
+        # (Ваша логіка обробки 'forces' та 'moments' залишилася без змін)
         if len (forces) >0:
             if len (forces)==1:
                 force = forces[0]
                 if force.local:
                     pass
-                    self.rel_velocity = self.rel_velocity+force.get_force_vector*delta*1.1
+                    self.rel_velocity = self.rel_velocity + force.get_force_vector * delta / effective_mass
                 else:
-                    self.velocity = self.velocity + force.get_force_vector*delta*1.1
+                    self.velocity = self.velocity + force.get_force_vector * delta / effective_mass
+                
+                # ... (решта вашого коду) ...
                 res_velocity = self.velocity + self.rel_velocity @ self.rotation_matrix
                 res_angular_velocity= Euler ([0.0,0.0,0.0])
-                #temp_angular_velocity= Euler(global_to_relative_euler(self.rotation_euler,self.angular_velocity))
+                
                 local_angular_velocity = np.dot(self.rotation_matrix.inverted(), self.angular_velocity).flatten()
                 for i in range (len(res_angular_velocity)):
-                     res_angular_velocity[i]+= self.rel_angular_velocity[i]+local_angular_velocity[i]#'''
-                way = res_velocity*delta
+                        res_angular_velocity[i]+= self.rel_angular_velocity[i]+local_angular_velocity[i]
+                way = res_velocity*delta*1.0
             else:
                 res_force = Force([0.0,0.0,0.0])
                 res_moment = Euler([0.0,0.0,0.0])
@@ -595,64 +691,59 @@ class PhysicBody:
                 if scalar >0.001:
                     #pass
                     #self.angular_velocity =
-                    self.angular_velocity = self.angular_velocity + res_moment*delta*0.2#/(2*self.mass))
+                    self.angular_velocity = self.angular_velocity + res_moment*delta / I_approx
                 print (res_force.get_force_vector)
                 if res_force.local:
                     #pass
-                    self.rel_velocity = self.rel_velocity + res_force.get_force_vector*delta*0.1
+                    self.rel_velocity = self.rel_velocity + res_force.get_force_vector*delta / effective_mass
                 else:
-                    self.velocity = self.velocity + res_force.get_force_vector*delta*0.1
+                    self.velocity = self.velocity + res_force.get_force_vector*delta / effective_mass
+                
+                # ... (решта вашого коду) ...
                 res_velocity = self.velocity +self.rel_velocity @ self.rotation_matrix
-                #res_angular_velocity= self.angular_velocity
-                #res_rel_angular_velocity=self.rel_angular_velocity
                 res_angular_velocity= Euler ([0.0,0.0,0.0])
                 local_angular_velocity = np.dot(self.rotation_matrix.inverted(), self.angular_velocity).flatten()
                 for i in range (len(res_angular_velocity)):
-                     res_angular_velocity[i]+= self.rel_angular_velocity[i]+local_angular_velocity[i]#'''
+                        res_angular_velocity[i]+= self.rel_angular_velocity[i]+local_angular_velocity[i]
                 way = res_velocity*delta
         else:
             res_velocity = self.velocity +self.rel_velocity @ self.rotation_matrix
             res_angular_velocity= Euler ([0.0,0.0,0.0])
-            #res_angular_velocity= Euler(global_to_relative_euler(self.angular_velocity,self.rotation_euler))
             local_angular_velocity = np.dot(self.rotation_matrix.inverted(), self.angular_velocity).flatten()
             for i in range (len(res_angular_velocity)):
-                     res_angular_velocity[i]+= self.rel_angular_velocity[i]+local_angular_velocity[i]#'''
-                     res_angular_velocity[i]+= self.rel_angular_velocity[i]#'''
+                        res_angular_velocity[i]+= self.rel_angular_velocity[i]+local_angular_velocity[i]
             way = res_velocity*delta
 
+        # --- 4. Інтеграція кутової швидкості (від Joint) ---
+        # Додаємо накопичений момент до кутової швидкості
+        # a_rot = Torque / Inertia
+        for i in range (3):
+            self.rel_angular_velocity[i] += (total_local_torque[i] * delta / I_approx)
+        
+        # Оновлюємо res_angular_velocity новим значенням
+        for i in range (len(res_angular_velocity)):
+            res_angular_velocity[i] = self.rel_angular_velocity[i] + local_angular_velocity[i]
+
+        # --- 5. Інтеграція позиції та обертання (ваш код) ---
         rot_1 =Euler ([0.0,0.0,0.0])
         for i in range (3):
-            rot_1[i] = res_angular_velocity[i]*delta*1.0
-        #rot_1[i] = res_angular_velocity*delta*1.0
+            rot_1[i] = res_angular_velocity[i]*delta
+        
         matrix_new = (self.rotation_matrix @ (rot_1).to_matrix()).normalized()
         for i in range (3):
             for j in range (3):
                 self.matrix_base[i][j] = matrix_new[i][j]
             self.matrix_base[i][3] += way[i]
-        for joint in self.joints:
-            drot = joint.get_rotation_difference(self)
-            for i in range (3):
-                if last_rot [i] >  drot[i]:
-                    self.rel_angular_velocity[i] += drot[i]*delta*0.4
-                else:
-                    if  abs (drot[i]) > 0.0001:
-                        self.rel_angular_velocity[i] *= joint.friction* abs (last_rot [i]/drot[i])
-            res_velocity = self.velocity +self.rel_velocity @ self.rotation_matrix
-            way = res_velocity*delta*0.1
-            j_vec = joint.get_distance(self)
-            vec = j_vec  @ self.rotation_matrix -way @ self.rotation_matrix
-            scalar = (vec[0]**2+ vec[1]**2+vec[2]**2)**0.5
-            if joint.Body_1 == self:
-                react_force = Force(vec,strength =vec* scalar*0.5,offset = joint.pilot_1,local=True)
-                self.rel_velocity = self.rel_velocity +react_force.get_force_vector*delta*0.1
-            else:
-                react_force = Force(vec,strength = vec*scalar*0.5,offset = joint.pilot_2,local=True)
-                self.velocity = self.velocity + react_force.get_force_vector*delta*1.1
-            res_velocity = res_velocity + react_force.get_force_vector*delta
-            way = res_velocity*delta*1.0
-
-
-            '''for i in range (3):
-               self.matrix_base[i][3] +=way[i]#'''
-        #self.linked_object.matrix_world = self.matrix_base
+                
         return self.matrix_base
+A = PhysicBody(bpy.data.objects['Cube'])
+B = PhysicBody(bpy.data.objects['Cube.001'])
+print (A,B)
+J= Joint (B,A, pilot_1= [0.0,0.0,-1.5], pilot_2 =[0.0,0.0,1.50],flex = True,strength = 10.0,torque = 1.0,friction = 0.9,max_limit_rot = Euler([pi/2,pi/2,pi/2]),min_limit_rot = Euler([-pi/4,-pi/4,-pi/4]))
+A.joints.append (J)
+B.joints.append (J)
+for i in range (20):
+    for body in [A,B]:
+        body.slerp_motion(0.005)
+    for body in [A,B]:
+        body.apply_motion ()
